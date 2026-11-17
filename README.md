@@ -10,10 +10,15 @@ static dashboard with a detail view and farm plan for each one.
 
 The value model lives in `dashboard/model.js`, the same file the page runs:
 
-    implied value = TVL x peer multiple(category) x momentum(7d TVL change) x launch clock(days tokenless)
+    implied value = base(TVL, category) x momentum(7d TVL change) x launch clock(days tokenless)
 
-Peer multiples are learned from the snapshot's own token-trading protocols (median market cap / TVL by
-category, shrunk toward the market median). No protocol name is special-cased.
+The base is fitted on the snapshot's clean traded comps (tokens with a market cap, minus wrapped, staked
+and bridged products). `backtest()` scores four candidate base models (flat ratio, category ratio, size
+curve, size curve + category) by leave-one-out and by a walk-forward split on `listed_at`, and keeps the
+one with the smallest held-out error. On this snapshot that is the size curve + category: a typical miss
+of x3.4 on comps it never saw, against x4.6 for a flat ratio. Momentum and the launch clock are stated
+priors on top. Each row shows the held-out range, and its farm plan sizes the smallest deposit that earns
+three times its gas, or says watch. No protocol name is special-cased.
 
     mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input path/to/snapshot.json
 

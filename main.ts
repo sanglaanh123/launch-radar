@@ -89,6 +89,7 @@ const rows = radar.rows.map((r: any) => ({
   listed_at: r.listed_at,
   implied_value_usd: r.implied_value_usd,
   model: r.model,
+  play: { verdict: r.sizing.verdict, deposit_usd: r.sizing.size, breakeven_usd: r.sizing.breakeven, gas_usd: r.sizing.gas_all, expected_usd: r.sizing.expected },
   farm_steps: r.plan.map((s: any) => RM.stepText(s)),
 }));
 
@@ -109,7 +110,18 @@ if (rows[0].implied_value_usd === rows[rows.length - 1].implied_value_usd) fail(
 mkdirSync(out, { recursive: true });
 writeFileSync(
   join(out, 'board.json'),
-  `${JSON.stringify({ as_of: snapshot.as_of, source: snapshot.source, model: radar.constants, watchlist_size: snapshot.watchlist.length, rows })}\n`,
+  `${JSON.stringify({
+    as_of: snapshot.as_of,
+    source: snapshot.source,
+    model: radar.constants,
+    // Held-out scores of every candidate base model; the board uses the one named in `chosen`.
+    backtest: {
+      chosen: radar.backtest.best.key,
+      candidates: radar.backtest.candidates.map((c: any) => ({ key: c.key, label: c.label, comps: c.n, loo_miss_x: c.miss, loo_within_3x: c.within3, walk_forward_n: c.wf_n, walk_forward_miss_x: c.wf_miss, band: c.band })),
+    },
+    watchlist_size: snapshot.watchlist.length,
+    rows,
+  })}\n`,
 );
 writeFileSync(join(out, 'data.js'), `window.SNAPSHOT=${JSON.stringify(snapshot)};\n`);
 

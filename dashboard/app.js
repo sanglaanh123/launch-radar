@@ -6,7 +6,7 @@
   var SNAP = window.SNAPSHOT, RM = window.RadarModel;
   var main = document.getElementById('main'), detail = document.getElementById('detail');
   if (!SNAP || !RM) { main.textContent = 'No snapshot: run main.ts to write data.js beside this page.'; return; }
-  var R = RM.build(SNAP), money = RM.money, C = R.constants;
+  var R = RM.build(SNAP), money = RM.money, C = R.constants, BT = R.backtest, BEST = BT.best;
   var BY = {};
   R.rows.forEach(function (r) { BY[r.slug] = r; });
 
@@ -64,6 +64,8 @@
       if (r.tvl_usd < min) return false;
       if (S.trend === 'up' && !(r.change_7d > 0)) return false;
       if (S.trend === 'young' && !(r.model.age_days !== null && r.model.age_days < 365)) return false;
+      if (S.trend === 'farm' && r.sizing.verdict === 'watch') return false;
+      if (S.trend === 'watch' && r.sizing.verdict !== 'watch') return false;
       if (q && (r.name + ' ' + r.slug + ' ' + r.category).toLowerCase().indexOf(q) < 0) return false;
       return true;
     });
@@ -75,9 +77,10 @@
     ['tvl', 'TVL', function (r) { return r.tvl_usd; }],
     ['growth', '7d', function (r) { return r.change_7d === null ? -1e9 : r.change_7d; }],
     ['age', 'Tokenless for', function (r) { return r.model.age_days === null ? -1 : r.model.age_days; }],
-    ['mult', 'Peer x', function (r) { return r.model.multiple; }],
     ['implied', 'Implied value', function (r) { return r.implied_value_usd; }],
-    ['per1k', 'Airdrop / $1k', function (r) { return r.model.per_1k; }]
+    ['range', 'Held-out range', function (r) { return r.model.high; }],
+    ['per1k', 'Drop / $1k', function (r) { return r.model.per_1k; }],
+    ['play', 'Play', function (r) { return r.sizing.verdict === 'watch' ? 1e9 : r.sizing.size; }]
   ];
   function sortRows(rows) {
     var col = COLS.filter(function (c) { return c[0] === S.sort; })[0] || COLS[0], dir = Number(S.dir) || 1;
@@ -95,6 +98,7 @@
     [['Ranked, no token recorded', R.rows.length, 'every row scored by impliedValue()'],
       ['Watchlist covered', covered + ' / ' + R.watchlist_size, 'the floor: TVL at or above ' + money(R.floor_usd)],
       ['Early finds below the floor', R.rows.length - covered, 'pre-token, TVL ' + money(5e6) + ' to ' + money(R.floor_usd)],
+      ['Typical miss on unseen comps', '×' + BEST.miss.toFixed(1), BEST.label + ', picked by leave-one-out on ' + BEST.n + ' traded comps'],
       ['Total implied value', money(total), 'if every record stayed as it is'],
       ['Tokens already trading', R.trading.length, 'kept apart, priced by the market']
     ].forEach(function (x) { k.appendChild(h('div', { class: 'kpi' }, h('b', { text: x[1] }), h('span', { text: x[0] }), h('small', { text: x[2] }))); });
@@ -119,7 +123,7 @@
       select('Category', 'cat', [['', 'All categories']].concat(CATS.map(function (c) { return [c, c]; }))),
       select('Main chain', 'chain', [['', 'All chains']].concat(CHAINS.map(function (c) { return [c, c]; }))),
       select('TVL at least', 'min', [['0', 'Any'], ['20000000', '$20M'], ['50000000', '$50M'], ['100000000', '$100M'], ['500000000', '$500M']]),
-      select('Signal', 'trend', [['any', 'Any'], ['up', 'TVL rising 7d'], ['young', 'Under 1 year old']]),
+      select('Signal', 'trend', [['any', 'Any'], ['up', 'TVL rising 7d'], ['young', 'Under 1 year old'], ['farm', 'Worth farming'], ['watch', 'Watch only']]),
       h('span', { class: 'count', id: 'count', text: count }),
       active ? h('button', { class: 'ghost', onclick: function () { set({ scope: 'all', cat: '', chain: '', min: '0', trend: 'any', q: '' }); } }, 'Clear filters') : null);
   }
@@ -166,32 +170,70 @@
         h('td', { class: 'num', text: money(r.tvl_usd) }),
         h('td', { class: 'num ' + (r.change_7d > 0 ? 'up' : r.change_7d < 0 ? 'down' : ''), text: pct(r.change_7d) }),
         h('td', { class: 'num', text: age(m.age_days) }),
-        h('td', { class: 'num', text: m.multiple.toFixed(2) + 'x' }),
         h('td', { class: 'num val' }, h('span', { text: money(r.implied_value_usd) }), h('i', { style: 'width:' + Math.max(1, Math.sqrt(r.implied_value_usd / max) * 100).toFixed(1) + '%' })),
-        h('td', { class: 'num', text: '$' + m.per_1k.toFixed(0) }),
+        h('td', { class: 'num dim', text: money(m.low) + ' – ' + money(m.high) }),
+        h('td', { class: 'num', text: '$' + m.per_1k.toFixed(2) }),
+        h('td', null, play(r.sizing)),
         h('td', null, h('span', { class: 'conf c' + m.confidence, title: 'A: 5+ peers and full data; B: 2+ peers; C: market median', text: m.confidence })));
     }));
-    if (!rows.length) body = h('tbody', null, h('tr', null, h('td', { colspan: '9', class: 'empty', text: 'No protocol matches these filters.' })));
+    if (!rows.length) body = h('tbody', null, h('tr', null, h('td', { colspan: '10', class: 'empty', text: 'No protocol matches these filters.' })));
     tableWrap.innerHTML = '';
     tableWrap.appendChild(h('table', { class: 'board' }, h('thead', null, head), body));
+  }
+
+  function play(z) {
+    return h('span', { class: 'play ' + z.verdict.replace(' ', '-'), title: 'Gas ' + money(z.gas_all) + ' · expected ' + money(z.expected) + ' · break-even ' + money(z.breakeven || 0),
+      text: z.verdict === 'watch' ? 'watch' : 'farm $' + (z.size >= 1000 ? z.size / 1000 + 'k' : z.size) });
+  }
+
+  function calibration(w, hgt) {
+    // Each traded comp: what the chosen base predicted with that comp held out (across) against its real
+    // market cap (up), both log. The diagonal is a perfect call; the band is within 3x.
+    var lo = 5, hi = 11, P = 22, sx = function (v) { return P + (Math.log10(v) - lo) / (hi - lo) * (w - P - 6); };
+    var sy = function (v) { return hgt - 16 - (Math.log10(v) - lo) / (hi - lo) * (hgt - 24); }, k = Math.log10(3);
+    var band = '<path class="band" d="M' + sx(1e5) + ',' + sy(Math.pow(10, lo + k)) + ' L' + sx(Math.pow(10, hi - k)) + ',' + sy(1e11) + ' L' + sx(1e11) + ',' + sy(1e11) + ' L' + sx(1e11) + ',' + sy(Math.pow(10, hi - k)) + ' L' + sx(Math.pow(10, lo + k)) + ',' + sy(1e5) + ' L' + sx(1e5) + ',' + sy(1e5) + 'Z"/>';
+    var dots = BEST.loo.map(function (x) {
+      var cl = Math.max(1e5, Math.min(1e11, x.predicted)), ca = Math.max(1e5, Math.min(1e11, x.actual));
+      return '<circle cx="' + sx(cl).toFixed(1) + '" cy="' + sy(ca).toFixed(1) + '" r="2.6"><title>' + esc(x.slug) + ': predicted ' + money(x.predicted) + ', trades at ' + money(x.actual) + '</title></circle>';
+    }).join('');
+    var tag = function (t) { return money(t).replace(/\.0+([MB])/, '$1'); };
+    var ticks = [1e6, 1e8, 1e10].map(function (t) { return '<text x="' + sx(t) + '" y="' + (hgt - 3) + '" text-anchor="middle">' + tag(t) + '</text><text x="0" y="' + (sy(t) + 3) + '">' + tag(t) + '</text>'; }).join('') +
+      '<text x="' + (w - 4) + '" y="' + (hgt - 22) + '" text-anchor="end">predicted →</text><text x="' + (P + 2) + '" y="8">actual ↑</text>';
+    return '<svg class="calib" width="' + w * 1.25 + '" height="' + hgt * 1.25 + '" viewBox="0 0 ' + w + ' ' + hgt + '" role="img" aria-label="Held-out prediction against real market cap">' + band +
+      '<line x1="' + sx(1e5) + '" y1="' + sy(1e5) + '" x2="' + sx(1e11) + '" y2="' + sy(1e11) + '"/>' + ticks + dots + '</svg>';
+  }
+
+  function backtestTable() {
+    return h('table', { class: 'bt' }, h('thead', null, h('tr', null, ['Base model', 'LOO miss', 'In 3×', 'Walk-fwd'].map(function (t) { return h('th', { text: t }); }))),
+      h('tbody', null, BT.candidates.map(function (c) {
+        return h('tr', { class: c.key === BEST.key ? 'win' : null }, h('td', { text: (c.key === BEST.key ? '✓ ' : '') + c.label }),
+          h('td', { class: 'num', text: '×' + c.miss.toFixed(2) }), h('td', { class: 'num', text: Math.round(c.within3 * 100) + '%' }), h('td', { class: 'num', text: '×' + c.wf_miss.toFixed(2) }));
+      })));
+  }
+
+  function backtestCard() {
+    return h('div', { class: 'legend' }, h('h3', { text: 'Tested on comps it never saw' }),
+      h('div', { class: 'btwrap' }, h('div', { html: calibration(170, 150) }), backtestTable()),
+      h('p', { class: 'fine', text: BEST.n + ' clean traded comps, each predicted with itself held out; walk-forward fits the ' + (BEST.n - BEST.wf_n) + ' listed before ' + BEST.wf_from + ' and predicts the ' + BEST.wf_n + ' after. ' + BEST.label + ' wins and prices every row; momentum and launch clock are stated priors on top.' }));
   }
 
   function viewBoard() {
     var rows = filtered();
     tableWrap = h('div', { class: 'tablewrap' });
-    var out = h('div', null, filterBar(''), h('div', { class: 'overview' }, scatter(rows), topList(rows), legend()), tableWrap);
+    var out = h('div', null, filterBar(''), h('div', { class: 'overview' }, scatter(rows), topList(rows), backtestCard()), tableWrap);
     main.appendChild(out);
     drawTable();
   }
 
   function legend() {
     return h('div', { class: 'legend' }, h('h3', { text: 'How a row is valued' }),
-      h('p', { class: 'formula', html: 'TVL × <b>peer multiple</b> × <b>momentum</b> × <b>launch clock</b>' }),
+      h('p', { class: 'formula', html: '<b>base</b>(TVL, category) × <b>momentum</b> × <b>launch clock</b>' }),
       h('ul', null,
-        h('li', null, h('b', { text: 'Peer multiple: ' }), 'median market cap / TVL of the ' + R.peers._market.n + ' traded protocols in the snapshot, by category, shrunk to the market median ' + R.peers._market.median.toFixed(2) + 'x'),
-        h('li', null, h('b', { text: 'Momentum: ' }), '1 + ' + C.growth_weight + ' × 7d TVL change (' + C.growth_min + '% to +' + C.growth_max + '%)'),
-        h('li', null, h('b', { text: 'Launch clock: ' }), C.clock_start + ' at listing, ' + C.clock_peak + ' at ' + C.clock_peak_day + ' days tokenless, ' + C.clock_tail + ' from ' + (C.clock_tail_day / 365) + ' years'),
-        h('li', null, h('b', { text: 'Airdrop / $1k: ' }), C.airdrop_share * 100 + '% of the implied value shared over the TVL, per $1,000 kept in'),
+        h('li', null, h('b', { text: 'Base (fitted, tested): ' }), BEST.label + ', market cap ≈ ' + Math.exp(BT.curve.a).toFixed(1) + ' × TVL^' + BT.curve.b.toFixed(3) + (BEST.key === 'curve_cat' ? ' plus a shrunk category term' : '') + ', fitted on ' + BEST.n + ' clean comps and chosen over ' + (BT.candidates.length - 1) + ' rivals by held-out error'),
+        h('li', null, h('b', { text: 'Momentum (prior): ' }), '1 + ' + C.growth_weight + ' × 7d TVL change (' + C.growth_min + '% to +' + C.growth_max + '%)'),
+        h('li', null, h('b', { text: 'Launch clock (prior): ' }), C.clock_start + ' at listing, ' + C.clock_peak + ' at ' + C.clock_peak_day + ' days tokenless, ' + C.clock_tail + ' from ' + (C.clock_tail_day / 365) + ' years'),
+        h('li', null, h('b', { text: 'Range: ' }), 'the base\'s held-out residual quartiles, ×' + BEST.band[0].toFixed(2) + ' to ×' + BEST.band[1].toFixed(2)),
+        h('li', null, h('b', { text: 'Drop / $1k: ' }), C.airdrop_share * 100 + '% of the implied value shared over the TVL; Play sizes the smallest deposit that earns 3× its gas'),
         h('li', null, h('b', { text: 'Confidence: ' }), h('span', { class: 'conf cA', text: 'A' }), ' 5+ peers and full data ', h('span', { class: 'conf cB', text: 'B' }), ' 2+ peers ', h('span', { class: 'conf cC', text: 'C' }), ' market median')),
       h('p', { class: 'fine', text: 'Tokens that already trade (' + R.trading.length + ') are never ranked here: they sit in Already trading at their market value.' }));
   }
@@ -217,8 +259,11 @@
 
   function viewModel() {
     var cats = Object.keys(R.peers).filter(function (k) { return k !== '_market'; }).sort(function (a, b) { return R.peers[b].n - R.peers[a].n || (a < b ? -1 : 1); });
-    main.appendChild(h('div', { class: 'panel' }, h('h2', { text: 'The model, ' + C.version }), legend(),
-      h('h3', { text: 'Peer multiples learned from this snapshot' }),
+    main.appendChild(h('div', { class: 'panel' }, h('h2', { text: 'The model, ' + C.version }),
+      h('div', { class: 'overview two' }, legend(), h('div', { class: 'legend' }, h('h3', { text: 'Backtest: held-out prediction against real market cap' }),
+        h('div', { class: 'btwrap' }, h('div', { html: calibration(300, 230) }), backtestTable()),
+        h('p', { class: 'fine', text: Math.round(BEST.within3 * 100) + '% of unseen comps land within 3× of the call (the band). The curve\'s slope of ' + BT.curve.b.toFixed(2) + ' says a book twice as big trades at about ' + Math.pow(2, BT.curve.b).toFixed(2) + '× the market cap, not 2×: a flat ratio overprices the largest vaults.' }))),
+      h('h3', { text: 'Category multiples of the clean comps' }),
       h('table', { class: 'board compact' }, h('thead', null, h('tr', null, ['Category', 'Traded peers', 'Raw median', 'Shrunk multiple', 'Ranked rows'].map(function (t) { return h('th', { text: t }); }))),
         h('tbody', null, cats.map(function (c) {
           var p = R.peers[c], n = R.rows.filter(function (r) { return r.category === c; }).length;
@@ -235,10 +280,12 @@
     var m = r.model, peer = R.peers[r.category] || R.peers._market, steps = r.plan;
     detail.innerHTML = '';
     var factors = [['TVL', money(r.tvl_usd), 'DefiLlama, ' + R.as_of],
-      ['× peer multiple', m.multiple.toFixed(3) + 'x', m.peers_n + ' traded ' + (r.category || 'market') + ' peers'],
-      ['× momentum', m.momentum.toFixed(3), '7d TVL ' + pct(r.change_7d)],
-      ['× launch clock', m.clock.toFixed(3), age(m.age_days) + ' tokenless · ' + m.phase],
-      ['= implied value', money(r.implied_value_usd), 'rank ' + r.rank + ' of ' + R.rows.length]];
+      ['→ base', money(m.base), BEST.label.toLowerCase() + ', ' + m.multiple.toFixed(3) + '× TVL'],
+      ['× momentum', m.momentum.toFixed(3), 'prior · 7d TVL ' + pct(r.change_7d)],
+      ['× launch clock', m.clock.toFixed(3), 'prior · ' + age(m.age_days) + ' tokenless, ' + m.phase],
+      ['= implied value', money(r.implied_value_usd), 'rank ' + r.rank + ' of ' + R.rows.length],
+      ['held-out range', money(m.low) + ' – ' + money(m.high), 'half of unseen comps land here']];
+    var near = RM.nearestComps(r, R.comps), z = r.sizing;
     var sittings = steps.reduce(function (s, x) { return s + (x.time.indexOf('days') > 0 ? 0 : 1); }, 0);
     detail.appendChild(h('div', { class: 'dhead' },
       h('div', null, h('span', { class: 'tag ' + r.scope, text: r.scope === 'watchlist' ? 'watchlist' : 'early find' }), h('h2', { text: r.name }),
@@ -250,10 +297,13 @@
       h('div', null, h('span', { text: 'Per $1,000 farmed' }), h('b', { text: '$' + m.per_1k.toFixed(2) }))));
     detail.appendChild(h('h3', { text: 'Why this value' }));
     detail.appendChild(h('div', { class: 'waterfall' }, factors.map(function (f, i) {
-      return h('div', { class: 'wf' + (i === factors.length - 1 ? ' total' : '') }, h('span', { text: f[0] }), h('b', { text: f[1] }), h('small', { text: f[2] }));
+      return h('div', { class: 'wf' + (f[0].charAt(0) === '=' ? ' total' : i === factors.length - 1 ? ' range' : '') }, h('span', { text: f[0] }), h('b', { text: f[1] }), h('small', { text: f[2] }));
     })));
-    if (peer.peers.length) detail.appendChild(h('p', { class: 'peers', text: 'Peers: ' + peer.peers.slice(0, 6).map(function (p) { return p.name + ' ' + p.ratio.toFixed(2) + 'x'; }).join(' · ') + (peer.peers.length > 6 ? ' …' : '') }));
-    detail.appendChild(h('h3', { text: 'Farm plan · ' + steps.length + ' steps · ' + sittings + ' sittings plus the hold' }));
+    detail.appendChild(h('p', { class: 'peers', text: 'Nearest traded comps: ' + near.map(function (q) { return q.name + ' ' + money(q.tvl_usd) + ' TVL → ' + money(q.mcap_usd); }).join(' · ') }));
+    detail.appendChild(h('h3', null, 'Farm plan · ' + steps.length + ' steps · ' + sittings + ' sittings plus the hold ', play(z)));
+    detail.appendChild(h('div', { class: 'econ' }, [['Deposit', '$' + z.size.toLocaleString('en-US')], ['Gas, whole plan', money(z.gas_all)], ['Expected drop', money(z.expected)], ['Break-even', money(z.breakeven || 0)]].map(function (x) {
+      return h('div', null, h('span', { text: x[0] }), h('b', { text: x[1] }));
+    })));
     detail.appendChild(h('ol', { class: 'plan' }, steps.map(function (s) {
       return h('li', null, h('p', { text: s.step }), h('div', { class: 'meta' }, h('span', { class: 'cost', text: s.cost }), h('span', { class: 'time', text: s.time })));
     })));
